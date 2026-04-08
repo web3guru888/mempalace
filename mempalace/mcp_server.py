@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MemPalace MCP Server — read/write palace access for Claude Code
-================================================================
+=========================================================
 Install: claude mcp add mempalace -- python -m mempalace.mcp_server [--palace /path/to/palace]
 
 Tools (read):
@@ -32,6 +32,12 @@ from .palace_graph import traverse, find_tunnels, graph_stats
 import chromadb
 
 from .knowledge_graph import KnowledgeGraph
+
+
+
+_kg = KnowledgeGraph()
+_pheromone_decay_tick = 0
+
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -85,7 +91,7 @@ def _no_palace():
     }
 
 
-# ==================== READ TOOLS ====================
+# ============= READ TOOLS ====================
 
 
 def tool_status():
@@ -272,7 +278,7 @@ def tool_graph_stats():
     return graph_stats(col=col)
 
 
-# ==================== WRITE TOOLS ====================
+# ============= WRITE TOOLS ====================
 
 
 def tool_add_drawer(
@@ -331,7 +337,7 @@ def tool_delete_drawer(drawer_id: str):
         return {"success": False, "error": str(e)}
 
 
-# ==================== KNOWLEDGE GRAPH ====================
+# ============= KNOWLEDGE GRAPH ====================
 
 
 def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
@@ -371,7 +377,23 @@ def tool_kg_stats():
     return _kg.stats()
 
 
-# ==================== AGENT DIARY ====================
+def tool_kg_stigmergic_astar(start_entity: str, target_entity: str, influence: float = 0.7, max_depth: int = 5):
+    """Find optimal learned path leveraging stigmergic pheromone edge weights."""
+    return {"path": _kg.stigmergic_astar(start_entity, target_entity, influence=influence, max_depth=max_depth)}
+
+def tool_kg_deposit_pheromone(subject: str, predicate: str, object: str, amount: float = 1.0):
+    """Deposit pheromone on a successful path to influence future A* queries."""
+    _kg.deposit_pheromone(subject, predicate, object, amount=amount)
+    
+    # Tick decay
+    global _pheromone_decay_tick
+    _pheromone_decay_tick += 1
+    if _pheromone_decay_tick % 50 == 0:
+        _kg.evaporate_pheromones(decay_rate=0.1)
+        
+    return {"success": True, "fact": f"{subject} → {predicate} → {object}", "amount": amount}
+
+# ============= AGENT DIARY ====================
 
 
 def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
@@ -465,7 +487,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
         return {"error": str(e)}
 
 
-# ==================== MCP PROTOCOL ====================
+# ============= MCP PROTOCOL ====================
 
 TOOLS = {
     "mempalace_status": {
@@ -714,6 +736,34 @@ TOOLS = {
         },
         "handler": tool_diary_read,
     },
+    "mempalace_kg_stigmergic_astar": {
+        "description": "Find an optimal path between two concepts using STAN (Stigmergic A* Navigation). Uses pheromone trails accumulated from past traversals to find fast paths.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_entity": {"type": "string", "description": "Starting concept or node"},
+                "target_entity": {"type": "string", "description": "Target concept or node"},
+                "influence": {"type": "number", "description": "How much pheromones discount cost (default 0.7)"},
+                "max_depth": {"type": "integer", "description": "Maximum depth to search (default 5)"}
+            },
+            "required": ["start_entity", "target_entity"],
+        },
+        "handler": tool_kg_stigmergic_astar,
+    },
+    "mempalace_kg_deposit_pheromone": {
+        "description": "Deposit pheromone on a successful edge to reinforce it for future A* pathfinding queries.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subject": {"type": "string", "description": "Start entity of the edge"},
+                "predicate": {"type": "string", "description": "Relationship type"},
+                "object": {"type": "string", "description": "End entity of the edge"},
+                "amount": {"type": "number", "description": "Amount to deposit (default 1.0)"}
+            },
+            "required": ["subject", "predicate", "object"],
+        },
+        "handler": tool_kg_deposit_pheromone,
+    },
 }
 
 
@@ -765,6 +815,9 @@ def handle_request(request):
                 tool_args[key] = int(value)
             elif declared_type == "number" and not isinstance(value, (int, float)):
                 tool_args[key] = float(value)
+
+        # Apply specific tool routing if parameters were named dynamically 
+        # (Though **tool_args unpacks them naturally).
         try:
             result = TOOLS[tool_name]["handler"](**tool_args)
             return {
